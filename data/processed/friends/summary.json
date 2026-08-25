@@ -1,0 +1,45 @@
+{
+  "artifact_markers_removed": 18,
+  "embedded_speaker_labels_removed": 41,
+  "episodes": 236,
+  "excluded_empty": 29,
+  "excluded_transcript_notes": 6035,
+  "generated_artifacts": {
+    "excluded_utterances.jsonl": {
+      "bytes": 1362159,
+      "records": 6064,
+      "sha256": "5a96f357a7e68203fa6c991ff290ca41c112901ecdf95875d4f8150f60c1317b"
+    },
+    "manifest.jsonl": {
+      "bytes": 116053,
+      "records": 236,
+      "sha256": "fec58ca3231092612f245828d9d40830f0d17c3f952d946f929c7ee0a025fabe"
+    },
+    "text_repairs.jsonl": {
+      "bytes": 8309653,
+      "records": 14578,
+      "sha256": "7269ad31562d3f22725d4bc03dd95f5362d1c699941dce764bd16d87096b02ca"
+    }
+  },
+  "kept_source_utterances": 61309,
+  "orphan_colons_removed": 66,
+  "recovered_from_transcript_note": 1,
+  "scenes": 3099,
+  "source_files": {
+    "conversations.json": {
+      "bytes": 226811,
+      "sha256": "4c863000208fc5451e6d73975afb7a64e3d28e6979c00a0d13b3095b53ef9f7b"
+    },
+    "speakers.json": {
+      "bytes": 12832,
+      "sha256": "880b0ab87edd3446a74c235e39ebd10b4c91e9142024b8667f21e89f5f9da49e"
+    },
+    "utterances.jsonl": {
+      "bytes": 38196968,
+      "sha256": "814ba3becc44374c6ed276ad1f4e1b988ef4c35ff826372e80d98ba0ee6980c1"
+    }
+  },
+  "source_utterances": 67373,
+  "stage_directions_removed": 18495,
+  "training_lines": 61360
+}

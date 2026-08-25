@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Downloaded corpora are large and must remain local.
+data/raw/
