@@ -1,0 +1,41 @@
+{
+  "conversations": 83079,
+  "excluded_empty": 267,
+  "excluded_empty_conversations": 18,
+  "formatting_tags_removed": 7764,
+  "generated_artifacts": {
+    "excluded_utterances.jsonl": {
+      "bytes": 25882,
+      "records": 267,
+      "sha256": "2d1a27ef078dfe198b66cc1e7314ab3853c82a556b6e17ad4d9f72082f008287"
+    },
+    "manifest.jsonl": {
+      "bytes": 330077,
+      "records": 617,
+      "sha256": "af70133201922a2892f82bafa740683e51e222ba509000b52bb1d487c900da73"
+    },
+    "text_repairs.jsonl": {
+      "bytes": 1009999,
+      "records": 2867,
+      "sha256": "2b1a3139ee96c0a556f22e6871888b35291ca31a5fd350b3c220bf0feb726024"
+    }
+  },
+  "movies": 617,
+  "source_conversations": 83097,
+  "source_files": {
+    "conversations.json": {
+      "bytes": 16235683,
+      "sha256": "cc3b038ede8c112ef605434d20e0c599609e8aca3559ac77dfed0f5a4924a5ba"
+    },
+    "corpus.json": {
+      "bytes": 40358,
+      "sha256": "a2b98c8bcae8ab86ac5ca36f66cb7e6b15ce996284bce8b7ec82ee4379a71059"
+    },
+    "utterances.jsonl": {
+      "bytes": 359532269,
+      "sha256": "938917ae1d7b0ee0a82d1cf1588c35ba2dd5ecfb68573b56a144e4dca57f11f4"
+    }
+  },
+  "source_utterances": 304713,
+  "training_lines": 304446
+}

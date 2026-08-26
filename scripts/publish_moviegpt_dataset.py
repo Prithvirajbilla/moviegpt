@@ -4,21 +4,25 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-from collections import defaultdict
+import shutil
 from pathlib import Path
 from typing import Any
 
 if __package__:
-    from .clean_friends_corpus import END_OF_TEXT, iter_jsonl, sha256_file, write_jsonl
-    from .clean_friends_corpus import validate_cleaned_corpus
+    from .clean_friends_corpus import END_OF_TEXT, iter_jsonl, sha256_file
+    from .clean_friends_corpus import validate_cleaned_corpus as validate_friends
+    from .clean_movie_corpus import validate_cleaned_corpus as validate_movies
+    from .clean_opensubtitles import validate_opensubtitles
+    from .moviegpt_schema import DOCUMENT_FIELDS, SPLITS, document_split, parquet_schema
 else:
-    from clean_friends_corpus import END_OF_TEXT, iter_jsonl, sha256_file, write_jsonl
-    from clean_friends_corpus import validate_cleaned_corpus
+    from clean_friends_corpus import END_OF_TEXT, iter_jsonl, sha256_file
+    from clean_friends_corpus import validate_cleaned_corpus as validate_friends
+    from clean_movie_corpus import validate_cleaned_corpus as validate_movies
+    from clean_opensubtitles import validate_opensubtitles
+    from moviegpt_schema import DOCUMENT_FIELDS, SPLITS, document_split, parquet_schema
 
 
-SPLITS = ("train", "validation", "test")
 DEFAULT_REPO_NAME = "moviegpt"
 PLACEHOLDER_REPO_ID = "YOUR_USERNAME/moviegpt"
 LOADER_GROUP_FUNCTION = """def group_texts(batch):
@@ -36,20 +40,8 @@ LOADER_GROUP_FUNCTION = """def group_texts(batch):
 """
 
 
-def document_split(document_id: str) -> str:
-    """Assign a stable 90/5/5 split without depending on corpus order."""
-
-    bucket = int(hashlib.sha256(document_id.encode("utf-8")).hexdigest()[:8], 16)
-    percentile = bucket % 10_000
-    if percentile < 9_000:
-        return "train"
-    if percentile < 9_500:
-        return "validation"
-    return "test"
-
-
 def collect_friends_documents(friends_dir: Path) -> list[dict[str, object]]:
-    validation = validate_cleaned_corpus(friends_dir)
+    validation = validate_friends(friends_dir)
     documents: list[dict[str, object]] = []
 
     for _, manifest_record in iter_jsonl(friends_dir / "manifest.jsonl"):
@@ -88,8 +80,67 @@ def collect_friends_documents(friends_dir: Path) -> list[dict[str, object]]:
     return sorted(documents, key=lambda record: str(record["document_id"]))
 
 
+def collect_movie_documents(movie_dir: Path) -> list[dict[str, object]]:
+    validation = validate_movies(movie_dir)
+    documents: list[dict[str, object]] = []
+    for _, manifest_record in iter_jsonl(movie_dir / "manifest.jsonl"):
+        movie_id = manifest_record.get("movie_id")
+        movie_name = manifest_record.get("movie_name")
+        relative_file = manifest_record.get("file")
+        if not all(
+            isinstance(value, str)
+            for value in (movie_id, movie_name, relative_file)
+        ):
+            raise ValueError("Invalid Cornell Movie-Dialogs manifest record")
+        movie_path = movie_dir / relative_file
+        text = movie_path.read_text(encoding="utf-8")
+        if not text.endswith(f"{END_OF_TEXT}\n"):
+            raise ValueError(f"Missing GPT-2 end marker in {movie_id}")
+        documents.append(
+            {
+                "document_id": f"cornell_movie_dialogs:{movie_id}",
+                "source": "cornell_movie_dialogs",
+                "source_id": movie_id,
+                "title": movie_name,
+                "language": "en",
+                "license": "other",
+                "text": text,
+                "text_sha256": sha256_file(movie_path),
+                "character_count": len(text),
+                "byte_count": movie_path.stat().st_size,
+                "line_count": manifest_record.get("training_lines"),
+            }
+        )
+    if len(documents) != validation["movies"]:
+        raise ValueError("Cornell movie document count does not match validation")
+    return sorted(documents, key=lambda record: str(record["document_id"]))
+
+
+def write_parquet(path: Path, records: list[dict[str, object]]) -> dict[str, object]:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pa.Table.from_pylist(records, schema=parquet_schema())
+    pq.write_table(
+        table,
+        path,
+        compression="zstd",
+        compression_level=6,
+        use_dictionary=True,
+        write_statistics=True,
+    )
+    return {
+        "bytes": path.stat().st_size,
+        "documents": len(records),
+        "file": f"data/{path.name}",
+        "sha256": sha256_file(path),
+    }
+
+
 def dataset_card(repo_id: str, summary: dict[str, object]) -> str:
     split_counts = summary["splits"]
+    source_counts = summary["sources"]
+    opensubtitles_count = source_counts.get("opensubtitles_en", {}).get("documents", 0)
     return f"""---
 license: other
 language:
@@ -98,44 +149,40 @@ pretty_name: MovieGPT
 task_categories:
 - text-generation
 configs:
-- config_name: all
+- config_name: default
   default: true
   data_files:
   - split: train
-    path: data/friends/train.jsonl
+    path: data/train-*.parquet
   - split: validation
-    path: data/friends/validation.jsonl
+    path: data/validation-*.parquet
   - split: test
-    path: data/friends/test.jsonl
-- config_name: friends
-  data_files:
-  - split: train
-    path: data/friends/train.jsonl
-  - split: validation
-    path: data/friends/validation.jsonl
-  - split: test
-    path: data/friends/test.jsonl
+    path: data/test-*.parquet
 ---
 
 # MovieGPT
 
 An English-language, document-oriented dialogue corpus prepared for causal
-language-model training. This repository will grow as additional movie and
-subtitle sources are cleaned. The current release contains the cleaned
-ConvoKit Friends corpus.
+language-model training. All sources use one shared schema and one set of
+train/validation/test splits. The `source` field records provenance without
+separating the corpora into different dataset configurations.
 
 ## Current data
 
 | Source | Documents | Train | Validation | Test |
 | --- | ---: | ---: | ---: | ---: |
-| Friends | {summary['documents']} | {split_counts['train']} | {split_counts['validation']} | {split_counts['test']} |
+| Friends | {source_counts['friends']['documents']} | — | — | — |
+| Cornell Movie-Dialogs | {source_counts['cornell_movie_dialogs']['documents']} | — | — | — |
+| OpenSubtitles v2024 English | {opensubtitles_count} | — | — | — |
+| **Unified total** | **{summary['documents']}** | **{split_counts['train']}** | **{split_counts['validation']}** | **{split_counts['test']}** |
 
 Every row is one complete source document with a stable `document_id` and a
-`text` field. Friends documents correspond to episodes. Utterances are
-separated by newlines, scenes by blank lines, and every document ends with
-GPT-2's `<|endoftext|>` token. Train, validation, and test assignment is a
-stable SHA-256-based 90/5/5 split, so adding sources later will not reshuffle
-existing documents.
+`text` field. Friends documents correspond to episodes, Cornell documents to
+movies, and OpenSubtitles documents to artificial 512-line chunks because the
+OPUS plain-text archive does not preserve movie boundaries. Utterances are
+separated by newlines and every document ends with GPT-2's `<|endoftext|>`
+token. Train, validation, and test assignment is a stable SHA-256-based 90/5/5
+split, so adding sources later will not reshuffle existing documents.
 
 ## Load for GPT-2
 
@@ -143,7 +190,7 @@ existing documents.
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-dataset = load_dataset("{repo_id}", "all")
+dataset = load_dataset("{repo_id}")
 tokenizer = AutoTokenizer.from_pretrained("gpt2")
 block_size = min(tokenizer.model_max_length, 1024)
 
@@ -158,9 +205,9 @@ tokenized = dataset.map(
 language_model_data = tokenized.map(group_texts, batched=True)
 ```
 
-Use the `friends` configuration to load only that source. The default `all`
-configuration currently contains the same records and will include additional
-cleaned sources in future releases.
+Use `dataset.filter(lambda row: row["source"] == "friends")` when a single
+source is needed. The Hub repository intentionally exposes one unified
+configuration.
 
 ## Fields
 
@@ -173,15 +220,24 @@ cleaned sources in future releases.
 
 ## Cleaning and provenance
 
-The Friends data excludes transcript notes and nonverbal-only rows, removes
+Friends excludes transcript notes and nonverbal-only rows, removes
 stage directions and transcript-parser artifacts, preserves scene boundaries,
 and does not serialize speaker or annotation metadata into the training text.
-The source is ConvoKit's
+Cornell Movie-Dialogs reconstructs each reply chain, removes empty utterances
+and known screenplay-formatting tags, and preserves conversation boundaries.
+OpenSubtitles removes subtitle markup, nonverbal cues, music-only lines,
+caption credits, and immediate duplicates before fixed-size chunking.
+
+The Friends source is ConvoKit's
 [Friends Corpus](https://convokit.cornell.edu/documentation/friends.html),
 whose documentation identifies the original Emory NLP data as Apache-2.0.
-Licensing is recorded per document because future MovieGPT sources may use
-different licenses. Users remain responsible for reviewing source-specific
-terms before redistribution or model release.
+Cornell data comes from ConvoKit's
+[Cornell Movie-Dialogs Corpus](https://convokit.cornell.edu/documentation/movie.html),
+and subtitle text comes from
+[OPUS OpenSubtitles v2024](https://opus.nlpl.eu/datasets/OpenSubtitles).
+Licensing is recorded per document because the sources use different terms.
+Users remain responsible for reviewing source-specific rights before
+redistribution or model release.
 
 Build metadata and counts are recorded in `dataset_summary.json`.
 """
@@ -191,47 +247,83 @@ def build_moviegpt_package(
     friends_dir: Path,
     output_dir: Path,
     repo_id: str = PLACEHOLDER_REPO_ID,
+    movie_dir: Path = Path("data/processed/movie_corpus"),
+    opensubtitles_dir: Path | None = None,
 ) -> dict[str, object]:
-    documents = collect_friends_documents(friends_dir)
-    records_by_split: dict[str, list[dict[str, object]]] = defaultdict(list)
-    for document in documents:
-        records_by_split[document_split(str(document["document_id"]))].append(
-            document
-        )
+    friends_documents = collect_friends_documents(friends_dir)
+    movie_documents = collect_movie_documents(movie_dir)
+    core_documents = friends_documents + movie_documents
+    records_by_split = {split: [] for split in SPLITS}
+    for document in core_documents:
+        records_by_split[document_split(str(document["document_id"]))].append(document)
 
-    friends_output_dir = output_dir / "data" / "friends"
-    friends_output_dir.mkdir(parents=True, exist_ok=True)
-    split_files: dict[str, dict[str, object]] = {}
+    data_dir = output_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    for legacy_directory in (data_dir / "friends", data_dir / "movie_corpus"):
+        if legacy_directory.exists():
+            shutil.rmtree(legacy_directory)
+    for stale_path in data_dir.glob("*-core.parquet"):
+        stale_path.unlink()
+
+    file_records: list[dict[str, object]] = []
+    core_split_counts: dict[str, int] = {}
     for split in SPLITS:
-        split_path = friends_output_dir / f"{split}.jsonl"
-        write_jsonl(split_path, records_by_split[split])
-        split_files[split] = {
-            "documents": len(records_by_split[split]),
-            "bytes": split_path.stat().st_size,
-            "sha256": sha256_file(split_path),
-        }
+        split_path = data_dir / f"{split}-core.parquet"
+        records = sorted(records_by_split[split], key=lambda row: str(row["document_id"]))
+        file_record = write_parquet(split_path, records)
+        file_record["split"] = split
+        file_record["kind"] = "core"
+        file_records.append(file_record)
+        core_split_counts[split] = len(records)
+
+    opensubtitles_summary: dict[str, object] | None = None
+    resolved_opensubtitles_dir = opensubtitles_dir or data_dir
+    opensubtitles_summary_path = resolved_opensubtitles_dir / "opensubtitles_summary.json"
+    if opensubtitles_summary_path.is_file():
+        if resolved_opensubtitles_dir.resolve() != data_dir.resolve():
+            raise ValueError(
+                "OpenSubtitles shards must be generated directly in the package data directory"
+            )
+        validate_opensubtitles(resolved_opensubtitles_dir, opensubtitles_summary_path)
+        with opensubtitles_summary_path.open(encoding="utf-8") as handle:
+            opensubtitles_summary = json.load(handle)
+        for source_file in opensubtitles_summary["files"]:
+            file_records.append(
+                {
+                    **source_file,
+                    "file": f"data/{source_file['file']}",
+                    "kind": "opensubtitles",
+                }
+            )
+
+    opensubtitles_splits = (
+        opensubtitles_summary["splits"]
+        if opensubtitles_summary is not None
+        else {split: 0 for split in SPLITS}
+    )
+    split_counts = {
+        split: core_split_counts[split] + int(opensubtitles_splits[split])
+        for split in SPLITS
+    }
+    source_counts = {
+        "friends": {"documents": len(friends_documents)},
+        "cornell_movie_dialogs": {"documents": len(movie_documents)},
+        "opensubtitles_en": {
+            "documents": (
+                int(opensubtitles_summary["cleaning"]["documents"])
+                if opensubtitles_summary is not None
+                else 0
+            )
+        },
+    }
 
     summary: dict[str, object] = {
-        "format_version": 1,
-        "documents": len(documents),
-        "splits": {
-            split: len(records_by_split[split]) for split in SPLITS
-        },
-        "sources": {"friends": {"documents": len(documents)}},
-        "files": split_files,
-        "fields": [
-            "document_id",
-            "source",
-            "source_id",
-            "title",
-            "language",
-            "license",
-            "text",
-            "text_sha256",
-            "character_count",
-            "byte_count",
-            "line_count",
-        ],
+        "format_version": 2,
+        "documents": sum(split_counts.values()),
+        "splits": split_counts,
+        "sources": source_counts,
+        "files": file_records,
+        "fields": list(DOCUMENT_FIELDS),
     }
     (output_dir / "dataset_summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -274,6 +366,7 @@ def upload_moviegpt_package(
         repo_type="dataset",
         folder_path=package_dir,
         commit_message="Upload GPT-2-ready MovieGPT dataset",
+        delete_patterns=["data/friends/**"],
     )
     return {"repo_id": resolved_repo_id, "url": str(repo_url)}
 
@@ -285,6 +378,17 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/processed/friends"),
         help="Validated Friends corpus directory",
+    )
+    parser.add_argument(
+        "--movie-dir",
+        type=Path,
+        default=Path("data/processed/movie_corpus"),
+        help="Validated Cornell Movie-Dialogs corpus directory",
+    )
+    parser.add_argument(
+        "--opensubtitles-dir",
+        type=Path,
+        help="OpenSubtitles Parquet directory; must equal OUTPUT_DIR/data",
     )
     parser.add_argument(
         "--output-dir",
@@ -323,6 +427,8 @@ def main() -> None:
         args.friends_dir,
         args.output_dir,
         repo_id=resolved_repo_id,
+        movie_dir=args.movie_dir,
+        opensubtitles_dir=args.opensubtitles_dir,
     )
     result: dict[str, object] = {"package": summary}
     if args.upload:

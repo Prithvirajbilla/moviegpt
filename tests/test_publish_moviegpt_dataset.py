@@ -1,4 +1,4 @@
-import json
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +12,7 @@ from scripts.publish_moviegpt_dataset import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PYARROW_AVAILABLE = importlib.util.find_spec("pyarrow") is not None
 
 
 class FakeHfApi:
@@ -31,36 +32,45 @@ class FakeHfApi:
 
 
 class PublishMoviegptDatasetTest(unittest.TestCase):
+    @unittest.skipUnless(PYARROW_AVAILABLE, "PyArrow is required for package tests")
     def test_builds_loader_ready_hub_package(self) -> None:
+        import pyarrow.parquet as pq
+
         with tempfile.TemporaryDirectory() as temporary_directory:
             output_dir = Path(temporary_directory) / "moviegpt"
             summary = build_moviegpt_package(
                 PROJECT_ROOT / "data" / "processed" / "friends",
                 output_dir,
                 repo_id="example/moviegpt",
+                movie_dir=PROJECT_ROOT / "data" / "processed" / "movie_corpus",
             )
 
-            self.assertEqual(summary["documents"], 236)
+            self.assertEqual(summary["documents"], 853)
             self.assertEqual(
                 summary["splits"],
-                {"train": 212, "validation": 10, "test": 14},
+                {"train": 761, "validation": 49, "test": 43},
+            )
+            self.assertEqual(summary["sources"]["friends"]["documents"], 236)
+            self.assertEqual(
+                summary["sources"]["cornell_movie_dialogs"]["documents"], 617
             )
 
             records = []
             for split, expected_count in summary["splits"].items():
-                split_path = output_dir / "data" / "friends" / f"{split}.jsonl"
-                split_records = [
-                    json.loads(line)
-                    for line in split_path.read_text(encoding="utf-8").splitlines()
-                ]
+                split_path = output_dir / "data" / f"{split}-core.parquet"
+                split_records = pq.read_table(split_path).to_pylist()
                 self.assertEqual(len(split_records), expected_count)
                 self.assertTrue(
                     all(document_split(record["document_id"]) == split for record in split_records)
                 )
                 records.extend(split_records)
 
-            self.assertEqual(len({record["document_id"] for record in records}), 236)
+            self.assertEqual(len({record["document_id"] for record in records}), 853)
             self.assertTrue(all(record["text"].endswith("<|endoftext|>\n") for record in records))
+            self.assertEqual(
+                {record["source"] for record in records},
+                {"friends", "cornell_movie_dialogs"},
+            )
             self.assertEqual(
                 set(records[0]),
                 {
@@ -79,8 +89,10 @@ class PublishMoviegptDatasetTest(unittest.TestCase):
             )
 
             readme = (output_dir / "README.md").read_text(encoding="utf-8")
-            self.assertIn('load_dataset("example/moviegpt", "all")', readme)
-            self.assertIn("config_name: friends", readme)
+            self.assertIn('load_dataset("example/moviegpt")', readme)
+            self.assertIn("config_name: default", readme)
+            self.assertNotIn("config_name: friends", readme)
+            self.assertFalse((output_dir / "data" / "friends").exists())
             self.assertTrue((output_dir / "dataset_summary.json").is_file())
 
     def test_upload_defaults_to_private_user_dataset(self) -> None:
@@ -107,6 +119,7 @@ class PublishMoviegptDatasetTest(unittest.TestCase):
             )
             self.assertEqual(api.uploaded[0]["repo_type"], "dataset")
             self.assertEqual(api.uploaded[0]["repo_id"], "moviegpt-test/moviegpt")
+            self.assertEqual(api.uploaded[0]["delete_patterns"], ["data/friends/**"])
 
     def test_dataset_card_loader_chunks_every_tokenizer_column(self) -> None:
         namespace = {"block_size": 4}
