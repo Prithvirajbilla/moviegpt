@@ -43,6 +43,7 @@ class PublishMoviegptDatasetTest(unittest.TestCase):
                 output_dir,
                 repo_id="example/moviegpt",
                 movie_dir=PROJECT_ROOT / "data" / "processed" / "movie_corpus",
+                allow_partial=True,
             )
 
             self.assertEqual(summary["documents"], 853)
@@ -94,6 +95,21 @@ class PublishMoviegptDatasetTest(unittest.TestCase):
             self.assertNotIn("config_name: friends", readme)
             self.assertFalse((output_dir / "data" / "friends").exists())
             self.assertTrue((output_dir / "dataset_summary.json").is_file())
+
+    @unittest.skipUnless(PYARROW_AVAILABLE, "PyArrow is required for package tests")
+    def test_requires_complete_opensubtitles_for_release_build(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_dir = Path(temporary_directory) / "moviegpt"
+
+            with self.assertRaisesRegex(
+                FileNotFoundError, "Missing required OpenSubtitles summary"
+            ):
+                build_moviegpt_package(
+                    PROJECT_ROOT / "data" / "processed" / "friends",
+                    output_dir,
+                    repo_id="example/moviegpt",
+                    movie_dir=PROJECT_ROOT / "data" / "processed" / "movie_corpus",
+                )
 
     def test_upload_defaults_to_private_user_dataset(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

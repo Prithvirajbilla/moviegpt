@@ -225,7 +225,7 @@ stage directions and transcript-parser artifacts, preserves scene boundaries,
 and does not serialize speaker or annotation metadata into the training text.
 Cornell Movie-Dialogs reconstructs each reply chain, removes empty utterances
 and known screenplay-formatting tags, and preserves conversation boundaries.
-OpenSubtitles removes subtitle markup, nonverbal cues, music-only lines,
+OpenSubtitles removes subtitle markup, nonverbal cues, music-marked lines,
 caption credits, and immediate duplicates before fixed-size chunking.
 
 The Friends source is ConvoKit's
@@ -249,6 +249,7 @@ def build_moviegpt_package(
     repo_id: str = PLACEHOLDER_REPO_ID,
     movie_dir: Path = Path("data/processed/movie_corpus"),
     opensubtitles_dir: Path | None = None,
+    allow_partial: bool = False,
 ) -> dict[str, object]:
     friends_documents = collect_friends_documents(friends_dir)
     movie_documents = collect_movie_documents(movie_dir)
@@ -287,6 +288,22 @@ def build_moviegpt_package(
         validate_opensubtitles(resolved_opensubtitles_dir, opensubtitles_summary_path)
         with opensubtitles_summary_path.open(encoding="utf-8") as handle:
             opensubtitles_summary = json.load(handle)
+        opensubtitles_input = opensubtitles_summary.get("input")
+        opensubtitles_cleaning = opensubtitles_summary.get("cleaning")
+        opensubtitles_documents = (
+            opensubtitles_cleaning.get("documents")
+            if isinstance(opensubtitles_cleaning, dict)
+            else None
+        )
+        if not allow_partial and (
+            not isinstance(opensubtitles_input, dict)
+            or opensubtitles_input.get("complete") is not True
+            or not isinstance(opensubtitles_documents, int)
+            or opensubtitles_documents <= 0
+        ):
+            raise ValueError(
+                "OpenSubtitles must be a complete, nonempty archive build"
+            )
         for source_file in opensubtitles_summary["files"]:
             file_records.append(
                 {
@@ -295,6 +312,10 @@ def build_moviegpt_package(
                     "kind": "opensubtitles",
                 }
             )
+    elif not allow_partial:
+        raise FileNotFoundError(
+            f"Missing required OpenSubtitles summary: {opensubtitles_summary_path}"
+        )
 
     opensubtitles_splits = (
         opensubtitles_summary["splits"]
@@ -410,6 +431,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Create a public repository instead of the safer private default",
     )
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Allow a development package without complete OpenSubtitles data",
+    )
     return parser.parse_args()
 
 
@@ -429,6 +455,7 @@ def main() -> None:
         repo_id=resolved_repo_id,
         movie_dir=args.movie_dir,
         opensubtitles_dir=args.opensubtitles_dir,
+        allow_partial=args.allow_partial,
     )
     result: dict[str, object] = {"package": summary}
     if args.upload:
