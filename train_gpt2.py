@@ -202,7 +202,7 @@ class GPT(nn.Module):
 
 # -----------------------------------------------------------------------------
 from huggingface_hub import HfApi, hf_hub_download, get_token
-from model_hub import export_model, upload_export
+from moviegpt_hub import export_model, upload_export
 from transformers import AutoTokenizer
 import pyarrow.parquet as pq
 from torch.utils.data import DataLoader, IterableDataset
@@ -553,7 +553,7 @@ def main():
                 except Exception as exc:
                     # Keep training on transient Hub/auth failures; the export can be retried.
                     print(f"Model upload failed ({type(exc).__name__}); local export: {export_path}. "
-                          f"Retry: python model_hub.py {export_path} --repo-id {hub_repo}"
+                          f"Retry: python moviegpt_hub.py {export_path} --repo-id {hub_repo}"
                               + (" --public" if not hub_private else ""))
 
 

@@ -9,7 +9,7 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
 
-from model_hub import export_model, upload_export
+from moviegpt_hub import export_model, upload_export
 from train_gpt2 import GPT, GPTConfig
 
 
@@ -48,7 +48,7 @@ class ModelHubTests(unittest.TestCase):
     def test_upload_uses_model_repo_and_scoped_export(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = self.export(directory)
-            with patch('model_hub.HfApi') as api:
+            with patch('moviegpt_hub.HfApi') as api:
                 upload_export(folder, 'relentlessml/moviegpt', private=False)
                 api.return_value.create_repo.assert_called_once_with(
                     repo_id='relentlessml/moviegpt', repo_type='model', private=False, exist_ok=True)
@@ -61,14 +61,14 @@ class ModelHubTests(unittest.TestCase):
     def test_upload_failure_keeps_local_export(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = self.export(directory)
-            with patch('model_hub.HfApi') as api:
+            with patch('moviegpt_hub.HfApi') as api:
                 api.return_value.upload_folder.side_effect = RuntimeError('offline')
                 with self.assertRaisesRegex(RuntimeError, 'offline'):
                     upload_export(folder, 'owner/repo')
             self.assertTrue((folder / 'model.safetensors').exists())
 
     def test_incomplete_export_never_contacts_hub(self):
-        with tempfile.TemporaryDirectory() as directory, patch('model_hub.HfApi') as api:
+        with tempfile.TemporaryDirectory() as directory, patch('moviegpt_hub.HfApi') as api:
             with self.assertRaisesRegex(ValueError, 'Incomplete'):
                 upload_export(directory, 'owner/repo')
             api.assert_not_called()

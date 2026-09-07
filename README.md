@@ -164,9 +164,45 @@ If an upload fails, training continues and prints the saved export path. Retry i
 without training again:
 
 ```bash
-python model_hub.py log/huggingface/step-19073 --repo-id relentlessml/moviegpt --public
+python moviegpt_hub.py log/huggingface/step-19073 --repo-id relentlessml/moviegpt --public
 ```
 
 Uploads run synchronously on rank zero at checkpoint boundaries; allow time for
 exporting and transferring the model. Both local checkpoints and exports consume
 disk space. No trained checkpoint is included in this source repository.
+
+## Run training from Colab
+
+Use a GPU runtime and run the repository's script as a separate Python process.
+The training script needs the companion `moviegpt_hub.py`; copying only the
+training script into a notebook cell is insufficient. The companion has a
+project-specific name to avoid the unrelated PyPI package `model_hub`.
+
+In a fresh Colab runtime (use the PR branch until it is merged):
+
+```python
+!git clone --branch codex/huggingface-training-and-monitoring https://github.com/Prithvirajbilla/moviegpt.git /content/moviegpt
+%cd /content/moviegpt
+%pip install -r requirements.txt
+```
+
+Log in using a write-capable Hugging Face token through the interactive prompt:
+
+```python
+from huggingface_hub import login
+login()
+```
+
+Before launching, reduce `B = 64` in `train_gpt2.py` for the GPU's memory; start
+with `B = 4` for a pilot and adjust after measuring memory use. The existing script
+uses BF16 on CUDA, so choose a BF16-capable GPU for this configuration.
+Then launch from the repository directory:
+
+```python
+!python train_gpt2.py
+```
+
+If `/content/moviegpt` already exists, use that checkout and pull its latest branch
+instead of cloning again. `example.ipynb` is the log-plotting notebook; training is
+launched separately. Setting `MOVIEGPT_HUB_UPLOAD=0` before launch skips login and
+uploads, while retaining local exports.
