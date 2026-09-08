@@ -1,6 +1,7 @@
 """Export MovieGPT to Transformers and publish a saved export to Hugging Face."""
 
 import argparse
+import os
 import json
 import shutil
 from pathlib import Path
@@ -12,7 +13,7 @@ from transformers import GPT2Config, GPT2LMHeadModel
 
 @torch.no_grad()
 def export_model(model, tokenizer, folder, *, step, dataset_id, dataset_revision,
-                 val_loss, log_file=None):
+                 val_loss, log_file=None, training_state=None):
     """Copy weights to CPU, converting Linear matrices to GPT-2 Conv1D layout."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
@@ -26,7 +27,8 @@ def export_model(model, tokenizer, folder, *, step, dataset_id, dataset_revision
         eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.eos_token_id,
         tie_word_embeddings=True,
     )
-    exported = GPT2LMHeadModel(hf_config)
+    with torch.random.fork_rng(devices=[]):
+        exported = GPT2LMHeadModel(hf_config)
     transposed = ("attn.c_attn.weight", "attn.c_proj.weight",
                   "mlp.c_fc.weight", "mlp.c_proj.weight")
     source = model.state_dict()
@@ -53,10 +55,23 @@ def export_model(model, tokenizer, folder, *, step, dataset_id, dataset_revision
         "tokenizer": tokenizer.name_or_path,
         "initialization": "random",
         "validation_scope": "fixed 20-batch window",
+        "resumable": training_state is not None,
     }
     (folder / "training_metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     if log_file is not None and Path(log_file).is_file():
         shutil.copyfile(log_file, folder / "log.txt")
+    if training_state is not None:
+        destination = folder / "training_state.pt"
+        temporary = folder / "training_state.pt.tmp"
+        temporary.unlink(missing_ok=True)
+        # Same-filesystem exports can share storage with the local checkpoint.
+        try:
+            os.link(training_state, temporary)
+        except OSError:
+            shutil.copyfile(training_state, temporary)
+        temporary.replace(destination)
+    else:
+        (folder / "training_state.pt").unlink(missing_ok=True)
     (folder / "README.md").write_text(f'''---
 library_name: transformers
 pipeline_tag: text-generation
@@ -101,9 +116,9 @@ print(tokenizer.decode(output[0], skip_special_tokens=True))
 ```
 
 The repository contains Safetensors weights, configuration, tokenizer files,
-`training_metadata.json`, and a metrics log when available. Optimizer state and
-data-loader position are not included; this export is for inference, not exact
-training resume. Padded vocabulary IDs are suppressed by the generation config.
+`training_metadata.json`, and a metrics log when available.
+{("The accompanying training_state.pt restores model, optimizer, schedule, per-rank RNG and data position with the MovieGPT training script." if training_state is not None else "This export has no training_state.pt; it supports inference and weights-only continuation, not full training resume.")}
+Padded vocabulary IDs are suppressed by the generation config.
 ''')
     return folder
 
@@ -121,7 +136,8 @@ def upload_export(folder, repo_id, *, private=True):
     return api.upload_folder(
         repo_id=repo_id, repo_type="model", folder_path=str(folder),
         allow_patterns=["*.safetensors", "*.json", "merges.txt", "vocab.txt", "tokenizer.model",
-                        "README.md", "log.txt"],
+                        "README.md", "log.txt", "training_state.pt"],
+        delete_patterns=None if metadata.get("resumable") else ["training_state.pt"],
         commit_message=f"MovieGPT after {metadata['optimizer_steps_completed']} optimizer updates",
     )
 
