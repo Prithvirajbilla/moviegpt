@@ -13,7 +13,7 @@ from transformers import GPT2Config, GPT2LMHeadModel
 
 @torch.no_grad()
 def export_model(model, tokenizer, folder, *, step, dataset_id, dataset_revision,
-                 val_loss, log_file=None, training_state=None):
+                 val_loss, log_file=None, training_state=None, model_size=None):
     """Copy weights to CPU, converting Linear matrices to GPT-2 Conv1D layout."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
@@ -48,6 +48,8 @@ def export_model(model, tokenizer, folder, *, step, dataset_id, dataset_revision
     exported.save_pretrained(folder)
     tokenizer.save_pretrained(folder)
     metadata = {
+        "model_size": model_size,
+        "parameter_count": sum(p.numel() for p in model.parameters()),
         "optimizer_steps_completed": step,
         "validation_loss": val_loss,
         "dataset": dataset_id,
@@ -90,6 +92,8 @@ A GPT-2 architecture language model trained from random weights on movie and TV
 dialogue using the GPT-2 tokenizer. This is a base language model, not an
 instruction-tuned chat model.
 
+- Model size: {model_size or "custom"} ({metadata["parameter_count"]:,} parameters)
+- Architecture: {config.n_layer} layers, {config.n_head} attention heads, width {config.n_embd}
 - Completed optimizer updates: {step}
 - Validation cross-entropy: {val_loss:.4f} nats/token
 - Dataset: [{dataset_id}](https://huggingface.co/datasets/{dataset_id})

@@ -80,6 +80,42 @@ class GPTConfig:
     n_head: int = 12 # number of heads
     n_embd: int = 768 # embedding dimension
 
+
+# All presets retain GPT-2 token IDs and a 1024-token context. The vocabulary is
+# padded to 50304 for matrix multiplication; these are parameter-size presets.
+MODEL_PRESETS = {
+    "small": dict(n_layer=6, n_head=6, n_embd=384),
+    "medium": dict(n_layer=8, n_head=8, n_embd=512),
+    "gpt2": dict(n_layer=12, n_head=12, n_embd=768),
+}
+
+
+def preset_config(name):
+    if name not in MODEL_PRESETS:
+        raise ValueError(f"Unknown MOVIEGPT_MODEL_SIZE {name!r}; choose small, medium, or gpt2")
+    return GPTConfig(vocab_size=50304, **MODEL_PRESETS[name])
+
+
+def select_model_config(name=None, checkpoint=None):
+    requested = preset_config(name) if name is not None else None
+    if checkpoint is not None:
+        saved = GPTConfig(**checkpoint["config"])
+        if requested is not None and requested != saved:
+            raise ValueError("MOVIEGPT_MODEL_SIZE conflicts with the checkpoint architecture. "
+                             "Omit it to use the saved model, or start a new run for a different size.")
+        return saved
+    return requested or preset_config("gpt2")
+
+
+def model_size_name(config):
+    return next((name for name in MODEL_PRESETS if preset_config(name) == config), "custom")
+
+
+def model_locations(name):
+    # Preserve the existing GPT-2 paths and isolate the smaller experiments.
+    suffix = f"-{name}" if name in {"small", "medium"} else ""
+    return (f"log/{name}" if suffix else "log", f"relentlessml/moviegpt{suffix}")
+
 class GPT(nn.Module):
 
     def __init__(self, config):
@@ -535,11 +571,19 @@ def prepare_logs(log_dir, resume_step=None):
 
 def main():
     global master_process
-    log_dir = os.environ.get("MOVIEGPT_LOG_DIR", "log")
+    requested_size = os.environ.get("MOVIEGPT_MODEL_SIZE")
+    if requested_size is not None:
+        preset_config(requested_size)  # validate before any downloads
+    default_log_dir, _ = model_locations(requested_size or "gpt2")
+    log_dir = os.environ.get("MOVIEGPT_LOG_DIR", default_log_dir)
     resume_source = os.environ.get("MOVIEGPT_RESUME")
     checkpoint = read_checkpoint(resume_source, log_dir) if resume_source else None
     saved_training = checkpoint.get("training", {}) if checkpoint else {}
-    hub_repo = os.environ.get("MOVIEGPT_MODEL_REPO", "relentlessml/moviegpt")
+    model_config = select_model_config(requested_size, checkpoint)
+    model_size = model_size_name(model_config)
+    default_log_dir, default_repo = model_locations(model_size)
+    log_dir = os.environ.get("MOVIEGPT_LOG_DIR", default_log_dir)
+    hub_repo = os.environ.get("MOVIEGPT_MODEL_REPO", default_repo)
     hub_upload = os.environ.get("MOVIEGPT_HUB_UPLOAD", "1")
     hub_private = os.environ.get("MOVIEGPT_MODEL_PRIVATE", "0")
     if hub_upload not in {"0", "1"} or hub_private not in {"0", "1"}:
@@ -605,7 +649,10 @@ def main():
     torch.set_float32_matmul_precision('high')
 
     # create model
-    model = GPT(GPTConfig(**checkpoint["config"]) if checkpoint else GPTConfig(vocab_size=50304))
+    model = GPT(model_config)
+    if master_process:
+        parameter_count = sum(p.numel() for p in model.parameters())
+        print(f"model size: {model_size} | parameters: {parameter_count:,}")
     # model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
     model.to(device)
     use_compile = False
@@ -754,6 +801,7 @@ def main():
                     raw_model, enc, os.path.join(log_dir, "huggingface", f"step-{step:05d}"),
                     step=step, dataset_id=documents.repo_id, dataset_revision=documents.revision,
                     val_loss=val_loss_accum.item(), log_file=log_file, training_state=checkpoint_path,
+                    model_size=model_size,
                 )
                 if hub_upload:
                     try:
