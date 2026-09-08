@@ -210,13 +210,30 @@ uploads, while retaining local exports.
 
 ## Continue a saved training run
 
-Resume the most recent local checkpoint:
+By default, training automatically resumes the local checkpoint with the highest
+saved completed step count that matches the selected model architecture (GPT-2
+unless `MOVIEGPT_MODEL_SIZE` is set). It starts fresh only in an unused run
+directory. To require an existing checkpoint:
 
 ```bash
 MOVIEGPT_RESUME=latest python train_gpt2.py
 ```
 
-Or choose a specific checkpoint:
+Both old `model_05000.pt` names and new `model_small_05000.pt` /
+`model_gpt2_05000.pt` names are supported. Small/medium runs also search the old
+shared `log/` directory unless `MOVIEGPT_LOG_DIR` is explicitly set. Unreadable
+files are skipped with a warning; existing incompatible or unreadable checkpoints
+in the run directory cause an error if no matching checkpoint remains. Training
+configuration compatibility is checked before restoring the selected checkpoint.
+
+To start a separate fresh run, choose an unused directory:
+
+```bash
+MOVIEGPT_MODEL_SIZE=small MOVIEGPT_RESUME=none MOVIEGPT_LOG_DIR=log/small-new python train_gpt2.py
+```
+
+Existing checkpoints are never intentionally overwritten. Use a new log directory
+when branching from an older checkpoint. Or choose a specific checkpoint:
 
 ```bash
 MOVIEGPT_RESUME=log/model_05000.pt python train_gpt2.py
@@ -269,3 +286,50 @@ New Hub exports include `training_state.pt`, so they take more storage and uploa
 time than inference-only exports. Local exports use a hard link for that file when
 possible to avoid another disk copy. `AutoModelForCausalLM` still loads the separate
 Safetensors weights for inference.
+
+## Model-size presets
+
+Choose the architecture with `MOVIEGPT_MODEL_SIZE`. The largest preset remains
+`gpt2` and is the default. These sizes refer to **parameters**, not vocabulary size
+or the number of training tokens.
+
+| Preset | Parameters | Layers | Attention heads | Hidden width | Default log directory | Default model repository |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| `small` | 30,357,504 (~30M) | 6 | 6 | 384 | `log/small` | `relentlessml/moviegpt-small` |
+| `medium` | 51,500,032 (~51.5M) | 8 | 8 | 512 | `log/medium` | `relentlessml/moviegpt-medium` |
+| `gpt2` | 124,475,904 (~124.5M) | 12 | 12 | 768 | `log` | `relentlessml/moviegpt` |
+
+Counts include tied token embeddings/output weights only once. All presets use
+GPT-2's 50,257-token tokenizer, a padded 50,304-entry model vocabulary, and a
+1,024-token context. Smaller presets train independently; their checkpoints cannot
+be resumed as a larger architecture.
+
+For the single A100 80 GB setup where microbatch 32 is working:
+
+```bash
+MOVIEGPT_MODEL_SIZE=small MOVIEGPT_MICRO_BATCH=32 python train_gpt2.py
+MOVIEGPT_MODEL_SIZE=medium MOVIEGPT_MICRO_BATCH=32 python train_gpt2.py
+MOVIEGPT_MODEL_SIZE=gpt2 MOVIEGPT_MICRO_BATCH=32 python train_gpt2.py
+```
+
+Run one of these at a time. The presets change architecture only: they retain the
+524,288-token effective batch, the 38,146-update default budget, and the same
+learning-rate defaults. Set `MOVIEGPT_MAX_STEPS` separately for a shorter pilot.
+Actual throughput and suitable learning rates should be measured for each size.
+
+Small/medium logs and public Hub model repositories are separate by default so
+experiments do not replace the final GPT-2 model. `MOVIEGPT_LOG_DIR` and
+`MOVIEGPT_MODEL_REPO` can override those destinations. Hub exports record the
+preset, parameter count, and architecture in the metadata/model card. Set the
+plotting notebook's `LOG_DIR` to the corresponding run directory.
+
+Resume a small run's latest local checkpoint:
+
+```bash
+MOVIEGPT_MODEL_SIZE=small MOVIEGPT_RESUME=latest python train_gpt2.py
+```
+
+For an explicit checkpoint path or `hf://relentlessml/moviegpt-small`, the saved
+architecture determines the size automatically. An explicitly conflicting
+`MOVIEGPT_MODEL_SIZE` fails before model allocation. Full-state resume restores
+the saved microbatch as before; the largest-model checkpoints remain compatible.

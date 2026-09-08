@@ -6,6 +6,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 import hashlib
 import random
+import pickle
 import shutil
 import warnings
 import torch
@@ -79,6 +80,42 @@ class GPTConfig:
     n_layer: int = 12 # number of layers
     n_head: int = 12 # number of heads
     n_embd: int = 768 # embedding dimension
+
+
+# All presets retain GPT-2 token IDs and a 1024-token context. The vocabulary is
+# padded to 50304 for matrix multiplication; these are parameter-size presets.
+MODEL_PRESETS = {
+    "small": dict(n_layer=6, n_head=6, n_embd=384),
+    "medium": dict(n_layer=8, n_head=8, n_embd=512),
+    "gpt2": dict(n_layer=12, n_head=12, n_embd=768),
+}
+
+
+def preset_config(name):
+    if name not in MODEL_PRESETS:
+        raise ValueError(f"Unknown MOVIEGPT_MODEL_SIZE {name!r}; choose small, medium, or gpt2")
+    return GPTConfig(vocab_size=50304, **MODEL_PRESETS[name])
+
+
+def select_model_config(name=None, checkpoint=None):
+    requested = preset_config(name) if name is not None else None
+    if checkpoint is not None:
+        saved = GPTConfig(**checkpoint["config"])
+        if requested is not None and requested != saved:
+            raise ValueError("MOVIEGPT_MODEL_SIZE conflicts with the checkpoint architecture. "
+                             "Omit it to use the saved model, or start a new run for a different size.")
+        return saved
+    return requested or preset_config("gpt2")
+
+
+def model_size_name(config):
+    return next((name for name in MODEL_PRESETS if preset_config(name) == config), "custom")
+
+
+def model_locations(name):
+    # Preserve the existing GPT-2 paths and isolate the smaller experiments.
+    suffix = f"-{name}" if name in {"small", "medium"} else ""
+    return (f"log/{name}" if suffix else "log", f"relentlessml/moviegpt{suffix}")
 
 class GPT(nn.Module):
 
@@ -426,13 +463,47 @@ def restore_rng(state, device):
         torch.mps.set_rng_state(state["mps"])
 
 
-def read_checkpoint(source, log_dir):
-    if source == "latest":
-        paths = list(Path(log_dir).glob("model_*.pt"))
-        paths = [p for p in paths if p.stem.removeprefix("model_").isdigit()]
-        if not paths:
-            raise FileNotFoundError(f"No model checkpoints in {log_dir}")
-        source = max(paths, key=lambda p: int(p.stem.removeprefix("model_")))
+def require_empty_run_directory(log_dir):
+    root = Path(log_dir)
+    metrics = root / "log.txt"
+    if list(root.glob("model_*.pt")) or (metrics.exists() and metrics.stat().st_size):
+        raise FileExistsError(f"Existing checkpoints or metrics in {root}. Resume this run or "
+                              "choose a new MOVIEGPT_LOG_DIR for a fresh run.")
+
+
+def read_checkpoint(source, log_dir, model_size=None, legacy_dirs=()):
+    if source == "none":
+        require_empty_run_directory(log_dir)
+        return None
+    if source in {"latest", "auto"}:
+        primary = list(Path(log_dir).glob("model_*.pt"))
+        paths = set(primary)
+        for directory in legacy_dirs:
+            paths.update(Path(directory).glob("model_*.pt"))
+        requested = preset_config(model_size) if model_size is not None else None
+        selected = None
+        selected_path = None
+        for path in sorted(paths):
+            try:
+                candidate = read_checkpoint(path, log_dir)
+                config = GPTConfig(**candidate["config"])
+            except (OSError, EOFError, RuntimeError, pickle.UnpicklingError, ValueError, TypeError, KeyError) as exc:
+                warnings.warn(f"Skipping unreadable checkpoint {path}: {type(exc).__name__}")
+                continue
+            if requested is not None and config != requested:
+                continue
+            # Use the saved completed step, not filename numbering or modification time.
+            if selected is None or candidate["step"] > selected["step"]:
+                selected, selected_path = candidate, path
+        if selected is not None:
+            selected["_resume_path"] = str(selected_path)
+            return selected
+        if source == "auto" and not primary:
+            require_empty_run_directory(log_dir)
+            return None
+        raise FileNotFoundError(f"No readable {model_size or 'matching'} checkpoint in {log_dir}. "
+                                "Existing files were left intact; choose the correct size/directory "
+                                "or a new MOVIEGPT_LOG_DIR for a fresh run.")
     elif str(source).startswith("hf://"):
         repo_id = str(source)[5:]
         revision = HfApi().model_info(repo_id, revision=os.environ.get("MOVIEGPT_RESUME_REVISION")).sha
@@ -465,11 +536,17 @@ def read_checkpoint(source, log_dir):
     # Keep restricted loading enabled; never fall back to arbitrary pickle execution.
     with torch.serialization.safe_globals([(GPTConfig, "__main__.GPTConfig"),
                                             (GPTConfig, "train_gpt2.GPTConfig")]):
-        checkpoint = torch.load(source, map_location="cpu", weights_only=True)
+        checkpoint = torch.load(source, map_location="cpu", weights_only=True, mmap=True)
+    if not isinstance(checkpoint, dict) or not {"model", "config", "step", "val_loss"} <= checkpoint.keys():
+        raise ValueError("Incomplete checkpoint")
     if checkpoint.get("checkpoint_version") not in (None, 2):
         raise ValueError("Unsupported checkpoint version")
     if not isinstance(checkpoint.get("step"), int) or checkpoint["step"] < 0:
         raise ValueError("Checkpoint must contain a nonnegative completed step count")
+    if checkpoint.get("checkpoint_version") == 2:
+        required = {"optimizer", "rank_states", "training", "target_steps"}
+        if not required <= checkpoint.keys():
+            raise ValueError("Incomplete training checkpoint")
     if isinstance(checkpoint["config"], GPTConfig):
         checkpoint["config"] = asdict(checkpoint["config"])
     return checkpoint
@@ -482,9 +559,15 @@ def save_checkpoint(path, model, optimizer, step, val_loss, rank_states, trainin
         "rank_states": rank_states, "training": training, "target_steps": target_steps,
     }
     path = Path(path)
+    if path.exists():
+        raise FileExistsError(f"Checkpoint already exists: {path}. Use a new MOVIEGPT_LOG_DIR "
+                              "when branching from an older checkpoint.")
     temporary = path.with_suffix(".pt.tmp")
     torch.save(checkpoint, temporary)
-    os.replace(temporary, path)  # interrupted writes cannot replace the previous checkpoint
+    if path.exists():
+        temporary.unlink(missing_ok=True)
+        raise FileExistsError(f"Checkpoint already exists: {path}")
+    os.replace(temporary, path)  # publish the completed checkpoint atomically
 
 
 def restore_training(checkpoint, model, optimizer, loader, rank, device, training):
@@ -515,6 +598,7 @@ def prepare_logs(log_dir, resume_step=None):
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / "log.txt"
     if resume_step is None:
+        require_empty_run_directory(log_dir)
         path.write_text("")
     elif path.exists():
         lines = path.read_text().splitlines(keepends=True)
@@ -535,11 +619,24 @@ def prepare_logs(log_dir, resume_step=None):
 
 def main():
     global master_process
-    log_dir = os.environ.get("MOVIEGPT_LOG_DIR", "log")
-    resume_source = os.environ.get("MOVIEGPT_RESUME")
-    checkpoint = read_checkpoint(resume_source, log_dir) if resume_source else None
+    requested_size = os.environ.get("MOVIEGPT_MODEL_SIZE")
+    if requested_size is not None:
+        preset_config(requested_size)  # validate before any downloads
+    default_log_dir, _ = model_locations(requested_size or "gpt2")
+    log_dir = os.environ.get("MOVIEGPT_LOG_DIR", default_log_dir)
+    resume_source = os.environ.get("MOVIEGPT_RESUME", "auto")
+    legacy_dirs = ("log",) if requested_size in {"small", "medium"} and "MOVIEGPT_LOG_DIR" not in os.environ else ()
+    checkpoint = read_checkpoint(
+        resume_source, log_dir,
+        model_size=(requested_size or "gpt2") if resume_source in {"auto", "latest"} else None,
+        legacy_dirs=legacy_dirs,
+    )
     saved_training = checkpoint.get("training", {}) if checkpoint else {}
-    hub_repo = os.environ.get("MOVIEGPT_MODEL_REPO", "relentlessml/moviegpt")
+    model_config = select_model_config(requested_size, checkpoint)
+    model_size = model_size_name(model_config)
+    default_log_dir, default_repo = model_locations(model_size)
+    log_dir = os.environ.get("MOVIEGPT_LOG_DIR", default_log_dir)
+    hub_repo = os.environ.get("MOVIEGPT_MODEL_REPO", default_repo)
     hub_upload = os.environ.get("MOVIEGPT_HUB_UPLOAD", "1")
     hub_private = os.environ.get("MOVIEGPT_MODEL_PRIVATE", "0")
     if hub_upload not in {"0", "1"} or hub_private not in {"0", "1"}:
@@ -605,7 +702,10 @@ def main():
     torch.set_float32_matmul_precision('high')
 
     # create model
-    model = GPT(GPTConfig(**checkpoint["config"]) if checkpoint else GPTConfig(vocab_size=50304))
+    model = GPT(model_config)
+    if master_process:
+        parameter_count = sum(p.numel() for p in model.parameters())
+        print(f"model size: {model_size} | parameters: {parameter_count:,}")
     # model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
     model.to(device)
     use_compile = False
@@ -653,7 +753,8 @@ def main():
         if start_step > max_steps:
             raise ValueError("Checkpoint step exceeds MOVIEGPT_MAX_STEPS (total target, not additional steps)")
         if master_process:
-            print(f"Resuming after {start_step} completed optimizer updates")
+            print(f"Resuming {model_size} from {checkpoint.get('_resume_path', resume_source)} "
+                  f"after {start_step} completed optimizer updates")
     if master_process:
         log_file = prepare_logs(log_dir, start_step if checkpoint else None)
     else:
@@ -747,13 +848,14 @@ def main():
             else:
                 rank_states = [local_state]
             if master_process:
-                checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                checkpoint_path = os.path.join(log_dir, f"model_{model_size}_{step:05d}.pt")
                 save_checkpoint(checkpoint_path, raw_model, optimizer, step,
                                 val_loss_accum.item(), rank_states, training, max_steps)
                 export_path = export_model(
                     raw_model, enc, os.path.join(log_dir, "huggingface", f"step-{step:05d}"),
                     step=step, dataset_id=documents.repo_id, dataset_revision=documents.revision,
                     val_loss=val_loss_accum.item(), log_file=log_file, training_state=checkpoint_path,
+                    model_size=model_size,
                 )
                 if hub_upload:
                     try:
