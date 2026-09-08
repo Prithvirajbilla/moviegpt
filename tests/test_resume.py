@@ -1,3 +1,4 @@
+from dataclasses import asdict
 import random
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ import pyarrow.parquet as pq
 import torch
 
 from train_gpt2 import (GPT, GPTConfig, MovieDataLoader, MovieDocuments, capture_rng,
-                        read_checkpoint, restore_training, save_checkpoint, prepare_logs)
+                        read_checkpoint, restore_training, save_checkpoint, prepare_logs, preset_config)
 from test_training_data import Documents, Tokenizer
 
 
@@ -122,8 +123,72 @@ class ResumeTests(unittest.TestCase):
             model = GPT(GPTConfig(vocab_size=100, block_size=3, n_layer=1, n_head=1, n_embd=8))
             with patch('train_gpt2.torch.save', side_effect=OSError('disk full')):
                 with self.assertRaisesRegex(OSError, 'disk full'):
-                    save_checkpoint(path, model, torch.optim.AdamW(model.parameters()),
-                                    1, 2.0, [], {}, 10)
+                    save_checkpoint(Path(directory) / 'model_00002.pt', model, torch.optim.AdamW(model.parameters()),
+                                    2, 2.0, [], {}, 10)
+            self.assertEqual(path.read_bytes(), b'previous checkpoint')
+
+
+
+    def checkpoint_fixture(self, directory, filename, size, step):
+        path = Path(directory) / filename
+        torch.save({'model': {'probe': torch.tensor([1])}, 'config': asdict(preset_config(size)),
+                    'step': step, 'val_loss': 3.0}, path)
+        return path
+
+    def test_latest_filters_architecture_and_uses_saved_step(self):
+        with tempfile.TemporaryDirectory() as directory:
+            expected = self.checkpoint_fixture(directory, 'model_00001.pt', 'small', 100)
+            self.checkpoint_fixture(directory, 'model_small_99999.pt', 'small', 50)
+            self.checkpoint_fixture(directory, 'model_medium_20000.pt', 'medium', 20000)
+            saved = read_checkpoint('auto', directory, model_size='small')
+            self.assertEqual(saved['step'], 100)
+            self.assertEqual(saved['_resume_path'], str(expected))
+
+    def test_corrupt_newest_falls_back_but_never_starts_fresh_over_existing_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            valid = self.checkpoint_fixture(directory, 'model_00001.pt', 'small', 1)
+            corrupt = Path(directory) / 'model_small_00002.pt'
+            corrupt.write_bytes(b'incomplete checkpoint')
+            with patch('train_gpt2.warnings.warn') as warning:
+                self.assertEqual(read_checkpoint('auto', directory, 'small')['step'], 1)
+                warning.assert_called_once()
+                valid.unlink()
+                with self.assertRaises(FileNotFoundError):
+                    read_checkpoint('auto', directory, 'small')
+            self.assertEqual(corrupt.read_bytes(), b'incomplete checkpoint')
+
+    def test_legacy_shared_directory_is_searched_for_requested_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            small_dir = Path(directory) / 'small'
+            self.checkpoint_fixture(directory, 'model_00500.pt', 'medium', 500)
+            self.assertIsNone(read_checkpoint('auto', small_dir, 'small', (directory,)))
+            self.checkpoint_fixture(directory, 'model_00100.pt', 'small', 100)
+            self.assertEqual(read_checkpoint('auto', small_dir, 'small', (directory,))['step'], 100)
+
+    def test_fresh_run_and_wrong_size_do_not_clobber_existing_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(read_checkpoint('auto', directory, 'small'))
+            self.checkpoint_fixture(directory, 'model_00500.pt', 'medium', 500)
+            with self.assertRaises(FileNotFoundError):
+                read_checkpoint('auto', directory, 'small')
+            with self.assertRaises(FileExistsError):
+                read_checkpoint('none', directory)
+            with self.assertRaises(FileExistsError):
+                prepare_logs(directory)
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'log.txt'
+            log.write_text('0 train 4.0\n')
+            with self.assertRaises(FileExistsError):
+                read_checkpoint('auto', directory, 'small')
+            self.assertEqual(log.read_text(), '0 train 4.0\n')
+
+    def test_checkpoint_cannot_overwrite_existing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'model_small_00001.pt'
+            path.write_bytes(b'previous checkpoint')
+            model = GPT(GPTConfig(vocab_size=100, block_size=3, n_layer=1, n_head=1, n_embd=8))
+            with self.assertRaises(FileExistsError):
+                save_checkpoint(path, model, torch.optim.AdamW(model.parameters()), 1, 2.0, [], {}, 10)
             self.assertEqual(path.read_bytes(), b'previous checkpoint')
 
 

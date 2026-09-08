@@ -210,13 +210,30 @@ uploads, while retaining local exports.
 
 ## Continue a saved training run
 
-Resume the most recent local checkpoint:
+By default, training automatically resumes the local checkpoint with the highest
+saved completed step count that matches the selected model architecture (GPT-2
+unless `MOVIEGPT_MODEL_SIZE` is set). It starts fresh only in an unused run
+directory. To require an existing checkpoint:
 
 ```bash
 MOVIEGPT_RESUME=latest python train_gpt2.py
 ```
 
-Or choose a specific checkpoint:
+Both old `model_05000.pt` names and new `model_small_05000.pt` /
+`model_gpt2_05000.pt` names are supported. Small/medium runs also search the old
+shared `log/` directory unless `MOVIEGPT_LOG_DIR` is explicitly set. Unreadable
+files are skipped with a warning; existing incompatible or unreadable checkpoints
+in the run directory cause an error if no matching checkpoint remains. Training
+configuration compatibility is checked before restoring the selected checkpoint.
+
+To start a separate fresh run, choose an unused directory:
+
+```bash
+MOVIEGPT_MODEL_SIZE=small MOVIEGPT_RESUME=none MOVIEGPT_LOG_DIR=log/small-new python train_gpt2.py
+```
+
+Existing checkpoints are never intentionally overwritten. Use a new log directory
+when branching from an older checkpoint. Or choose a specific checkpoint:
 
 ```bash
 MOVIEGPT_RESUME=log/model_05000.pt python train_gpt2.py

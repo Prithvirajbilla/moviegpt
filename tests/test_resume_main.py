@@ -62,7 +62,7 @@ class ResumeMainTests(unittest.TestCase):
                  patch.object(torch.backends.mps,'is_available',return_value=False):
                 with redirect_stdout(io.StringIO()):
                     training.main()
-            saved = training.read_checkpoint(Path(directory)/'model_00002.pt', directory)
+            saved = training.read_checkpoint(Path(directory)/'model_custom_00002.pt', directory)
             assert saved['step']==2
             assert saved['rank_states'][0]['loader']==loader.state_dict()
             assert all(state['step'].item()==2 for state in saved['optimizer']['state'].values())
