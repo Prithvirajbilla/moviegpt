@@ -19,10 +19,10 @@ class Tokenizer:
 
 
 class Documents:
-    def texts(self, split):
-        yield '1 2 3 99'
-        yield '4 5 6'
-        yield '7 8 9 10 11 12 13 14'
+    def records(self, split, cursor=None):
+        texts = ['1 2 3 99', '4 5 6', '7 8 9 10 11 12 13 14']
+        for index in range((cursor or {}).get('row', 0), len(texts)):
+            yield texts[index], {'shard': 0, 'row': index + 1}
 
 
 class TrainingDataTests(unittest.TestCase):

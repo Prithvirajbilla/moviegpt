@@ -10,7 +10,8 @@ from tokenizers.models import WordLevel
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
 
 from moviegpt_hub import export_model, upload_export
-from train_gpt2 import GPT, GPTConfig
+from train_gpt2 import GPT, GPTConfig, read_checkpoint
+from huggingface_hub.utils import EntryNotFoundError
 
 
 class ModelHubTests(unittest.TestCase):
@@ -66,6 +67,37 @@ class ModelHubTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'offline'):
                     upload_export(folder, 'owner/repo')
             self.assertTrue((folder / 'model.safetensors').exists())
+
+    def test_export_includes_training_state_and_preserves_rng(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'model_05000.pt'
+            torch.save({'step': 5000}, source)
+            before = torch.get_rng_state().clone()
+            folder = export_model(self.model, self.tokenizer, Path(directory) / 'export',
+                                  step=5000, dataset_id='relentlessml/moviegpt',
+                                  dataset_revision='fixed', val_loss=2.0, training_state=source)
+            self.assertTrue(torch.equal(torch.get_rng_state(), before))
+            self.assertEqual(torch.load(folder / 'training_state.pt', weights_only=True), {'step': 5000})
+            self.assertTrue(json.loads((folder / 'training_metadata.json').read_text())['resumable'])
+            with patch('moviegpt_hub.HfApi') as api:
+                upload_export(folder, 'owner/repo')
+                self.assertIn('training_state.pt', api.return_value.upload_folder.call_args.kwargs['allow_patterns'])
+
+    def test_legacy_hub_export_recovers_custom_model_weights(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = self.export(directory)
+            pretrained = AutoModelForCausalLM.from_pretrained(folder)
+            with patch('train_gpt2.HfApi') as api, patch('train_gpt2.hf_hub_download') as download, \
+                    patch('transformers.GPT2LMHeadModel.from_pretrained', return_value=pretrained):
+                api.return_value.model_info.return_value.sha = 'pinned-commit'
+                download.side_effect = [EntryNotFoundError('missing training state'),
+                                        str(folder / 'training_metadata.json')]
+                checkpoint = read_checkpoint('hf://owner/repo', directory)
+                self.assertEqual(checkpoint['step'], 5000)
+                for call in download.call_args_list:
+                    self.assertEqual(call.kwargs['revision'], 'pinned-commit')
+            for name, tensor in self.model.state_dict().items():
+                torch.testing.assert_close(checkpoint['model'][name], tensor)
 
     def test_incomplete_export_never_contacts_hub(self):
         with tempfile.TemporaryDirectory() as directory, patch('moviegpt_hub.HfApi') as api:

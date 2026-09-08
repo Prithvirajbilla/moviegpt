@@ -87,7 +87,8 @@ Earlier research remains in `docs/research/`. It includes broader movie/TV ideas
 Run `pip install -r requirements.txt`, then `python train_gpt2.py` (or
 `torchrun --standalone --nproc_per_node=8 train_gpt2.py` for eight CUDA GPUs).
 The existing defaults are a large training run: microbatch 64, context 1024,
-and 524,288 tokens per optimizer step. Adjust these in `main()` for your hardware.
+and 524,288 tokens per optimizer step. Set `MOVIEGPT_MICRO_BATCH=4` for a small
+memory pilot; new checkpoints remember the batch size for resume.
 
 `train_gpt2.py` downloads `relentlessml/moviegpt` through `huggingface_hub`,
 reads Parquet in batches with PyArrow, tokenizes with Transformers'
@@ -149,8 +150,8 @@ the pinned dataset revision, and the metrics log. It loads with
 Each upload commits the latest export to the repository root; earlier exports
 remain accessible through Hub commit history. The original training model's
 Linear matrices are transposed into Transformers GPT-2's Conv1D layout, and
-padded vocabulary IDs are suppressed during generation. Exports preserve model
-weights but do not include optimizer state or data position for exact resume.
+padded vocabulary IDs are suppressed during generation. New exports include `training_state.pt` with optimizer, schedule, RNG and data
+position for training resume; older exports contain model weights only.
 The dataset itself is not uploaded into the model repository.
 
 Configuration:
@@ -206,3 +207,65 @@ If `/content/moviegpt` already exists, use that checkout and pull its latest bra
 instead of cloning again. `example.ipynb` is the log-plotting notebook; training is
 launched separately. Setting `MOVIEGPT_HUB_UPLOAD=0` before launch skips login and
 uploads, while retaining local exports.
+
+## Continue a saved training run
+
+Resume the most recent local checkpoint:
+
+```bash
+MOVIEGPT_RESUME=latest python train_gpt2.py
+```
+
+Or choose a specific checkpoint:
+
+```bash
+MOVIEGPT_RESUME=log/model_05000.pt python train_gpt2.py
+```
+
+Resume from the model repository on another machine:
+
+```bash
+MOVIEGPT_RESUME=hf://relentlessml/moviegpt python train_gpt2.py
+```
+
+Use `MOVIEGPT_RESUME_REVISION` to choose a particular model-repository commit.
+Hub reads are pinned to one commit so model weights and metadata cannot come from
+different uploads. This model revision is separate from the saved dataset revision.
+
+New checkpoints restore weights, AdamW state, completed update count, learning-rate
+schedule, per-rank Python/PyTorch RNG, dataset revision, and each rank's next data
+position. The loader saves the Parquet shard/row and leftover tokens, skips earlier
+shards/row groups, and continues with the next batch instead of replaying the corpus.
+Epoch rollover is preserved. Checkpoints are written atomically every 5,000 completed
+updates and at the end; a crash can still lose work after the latest saved checkpoint.
+An already-running copy of the old script will continue writing the old checkpoint
+format until you relaunch with this version.
+
+The default total budget is **38,146 updates**. A full-state resume uses the saved
+total target by default. `MOVIEGPT_MAX_STEPS=50000` changes the total stopping point,
+not the number of additional updates. Extending a run preserves its original cosine
+schedule; after the saved decay endpoint, learning rate stays at its saved minimum.
+Resuming a checkpoint that already meets the target performs no further updates.
+
+Keep the saved microbatch, sequence length, GPU count, effective batch size, tokenizer,
+and dataset revision for a full-state resume; incompatible changes fail explicitly.
+Hardware/software differences and nondeterministic kernels can still change numerical
+results even with restored RNG. Choose your memory settings before the initial run.
+
+For old local `.pt` checkpoints and old Hub exports without `training_state.pt`, the
+script restores the learned weights and saved step, then warns that AdamW and the
+data position start fresh. Old Hub metadata also supplies the dataset revision.
+There is no way to recover optimizer/RNG/data state that was never saved. Set
+`MOVIEGPT_MICRO_BATCH` explicitly for those old checkpoints, since they did not save it.
+This is weights-only continuation, not an exact replay of the interrupted run.
+
+Set `MOVIEGPT_LOG_DIR` to choose the local checkpoint/log directory. Resume retains
+history through the checkpoint; if existing metrics extend past it, their complete
+original log is archived before the abandoned tail is removed. Generation samples
+remain appended in `samples.txt`. On a new machine, earlier logs stay available in
+the Hub repository; the local log starts from the resumed step.
+
+New Hub exports include `training_state.pt`, so they take more storage and upload
+time than inference-only exports. Local exports use a hard link for that file when
+possible to avoid another disk copy. `AutoModelForCausalLM` still loads the separate
+Safetensors weights for inference.
