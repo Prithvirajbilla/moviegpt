@@ -431,7 +431,7 @@ def main():
     max_lr = 6e-4
     min_lr = max_lr * 0.1
     warmup_steps = 715
-    max_steps = 19073 # training budget; not an epoch estimate for MovieGPT
+    max_steps = 19073*2 # training budget; not an epoch estimate for MovieGPT
     def get_lr(it):
         # 1) linear warmup for warmup_iters steps
         if it < warmup_steps:
